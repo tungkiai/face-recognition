@@ -12,10 +12,12 @@ from model import create_model
 from align import AlignDlib
 import glob
 import imutils
-import time as time_
-
-def millis():
-    return int(round(time_.time() * 1000))
+import flask
+import io
+from flask_cors import CORS, cross_origin
+from keras.preprocessing.image import img_to_array
+from keras.applications import imagenet_utils
+from PIL import Image
 
 # PRE-PROCESSING
 def l2_normalize(x, axis=-1, epsilon=1e-10):
@@ -67,10 +69,6 @@ def calc_emb_test(faces):
     embs = np.array(pd)
     return np.array(embs)
 
-def dump_video_info(cap):
-    print("Frame rate:")
-    print(cap.get(cv2.CAP_PROP_FPS))
-
 def detect_face(test_image):
     show_image = test_image.copy()
 
@@ -90,8 +88,6 @@ def detect_face(test_image):
 
     if(len(faces)==0):
         print("no face detected!")
-        show_image = imutils.resize(show_image,width = 720)   
-        cv2.imshow("result",show_image)
         return
     else:    
         test_embs = calc_emb_test(faces)
@@ -117,21 +113,18 @@ def detect_face(test_image):
         else:
             name = df_train[(df_train['label']==p[0])].name.iloc[0]
         names.append(name)
-        title = title + name + " "
+    return names
         
-    for i,faceRect in enumerate(faceRects):
-        x1 = faceRect.left()
-        y1 = faceRect.top()
-        x2 = faceRect.right()
-        y2 = faceRect.bottom()
-        cv2.rectangle(show_image,(x1,y1),(x2,y2),(255,0,0),3)
-        cv2.putText(show_image,names[i],(x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 2,(255,0,0),3,cv2.LINE_AA)
-        
-    show_image = imutils.resize(show_image,width = 720)   
-    cv2.imshow("result",show_image)
+def execute(image):
+	# Detect faces
+    names = detect_face(image)
+    return names
 
 
-# INITIALIZE MODELS
+# initialize our Flask application and the Keras model
+app = flask.Flask(__name__)
+CORS(app)
+
 nn4_small2 = create_model()
 
 nn4_small2.summary()
@@ -148,17 +141,17 @@ nb_classes = len(train_paths)
 df_train = pd.DataFrame(columns=['image', 'label', 'name'])
 
 for i,train_path in enumerate(train_paths):
-    name = train_path.split("\\")[-1]
-    images = glob.glob(train_path + "/*")
-    for image in images:
-        df_train.loc[len(df_train)]=[image,i,name]
-        
+	name = train_path.split("\\")[-1]
+	images = glob.glob(train_path + "/*")
+	for image in images:
+		df_train.loc[len(df_train)]=[image,i,name]
+		
 print(df_train.head())
 # TRAINING
 label2idx = []
 
 for i in tqdm(range(len(train_paths))):
-    label2idx.append(np.asarray(df_train[df_train.label == i].index))
+	label2idx.append(np.asarray(df_train[df_train.label == i].index))
 
 train_embs = calc_embs(df_train.image)
 np.save("train_embs.npy", train_embs)
@@ -166,22 +159,36 @@ np.save("train_embs.npy", train_embs)
 train_embs = np.concatenate(train_embs)
 threshold = 1
 
-# VIDEO
-# cap = cv2.VideoCapture(0)
-# while(cap.isOpened()):
-#     _, frame = cap.read()
-#     detect_face(frame)
-#     if cv2.waitKey(1) & 0xFF == ord('q'):
-#         break
-# cap.release()
-# cv2.destroyAllWindows()
+# execute()
 
-# TEST
-test_paths = glob.glob("test_image/*.jpg")
-for path in test_paths:
-    test_image = cv2.imread(path)
-    detect_face(test_image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-        
+@app.route("/predict", methods=["POST"])
+def predict():
+	# initialize the data dictionary that will be returned from the
+	# view
+	data = {"success": False}
+
+	# ensure an image was properly uploaded to our endpoint
+	if flask.request.method == "POST":
+		if flask.request.files.get("image"):
+			# read the image in PIL format
+			image = flask.request.files["image"].read()
+			image = Image.open(io.BytesIO(image))
+			image = np.array(image)
+			red = image[:,:,2].copy()
+			blue = image[:,:,0].copy()
+			image[:,:,0] = red
+			image[:,:,2] = blue
+			data["predictions"] = execute(image)
+			data["success"] = True
+
+	# return the data dictionary as a JSON response
+	return flask.jsonify(data)
+
+# if this is the main thread of execution first load the model and
+# then start the server
+if __name__ == "__main__":
+	print(("* Loading Keras model and Flask starting server..."
+		"please wait until server has fully started"))
+	app.run(debug = False, threaded = False)
+	
 
